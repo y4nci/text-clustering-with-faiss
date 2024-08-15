@@ -31,6 +31,8 @@ DEFAULT_TEMPLATE = "<s>[INST]{examples}\n\n{instruction}[/INST]"
 class ClusterClassifier:
     def __init__(
         self,
+        faiss_index=any,
+        embeddings=any,
         embed_model_name="all-MiniLM-L6-v2",
         embed_device="cpu",
         embed_batch_size=64,
@@ -50,6 +52,9 @@ class ClusterClassifier:
         summary_template=None,
         summary_instruction=None,
     ):
+        self.faiss_index = faiss_index
+        self.embeddings = embeddings
+
         self.embed_model_name = embed_model_name
         self.embed_device = embed_device
         self.embed_batch_size = embed_batch_size
@@ -80,8 +85,6 @@ class ClusterClassifier:
         else:
             self.summary_instruction = summary_instruction
 
-        self.embeddings = None
-        self.faiss_index = None
         self.cluster_labels = None
         self.texts = None
         self.projections = None
@@ -94,20 +97,34 @@ class ClusterClassifier:
         )
         self.embed_model.max_seq_length = self.embed_max_seq_length
 
-    def fit(self, texts, embeddings=None):
+    def fit(self, texts, embeddings, faiss_index, rebuild_faiss=False):
         self.texts = texts
 
         if embeddings is None:
-            logging.info("embedding texts...")
-            self.embeddings = self.embed(texts)
-        else:
-            logging.info("using precomputed embeddings...")
-            self.embeddings = embeddings
+            logging.info("no new embeddings provided, using initial embeddings...")
 
-        logging.info("building faiss index...")
-        self.faiss_index = self.build_faiss_index(self.embeddings)
+            embeddings = self.embeddings
+        else:
+            logging.info("using provided embeddings...")
+
+        if faiss_index is None:
+            logging.info(
+                "no new faiss index provided,"
+                "building a new one from the provided embeddings..." if rebuild_faiss else "using initial faiss index..."
+            )
+            
+            if rebuild_faiss:
+                logging.info("building faiss index...")
+                self.faiss_index = self.build_faiss_index(embeddings)
+            else:
+                faiss_index = self.faiss_index
+
+        else:
+            logging.info("using provided faiss index...")
+            self.faiss_index = faiss_index
+
         logging.info("projecting with umap...")
-        self.projections, self.umap_mapper = self.project(self.embeddings)
+        self.projections, self.umap_mapper = self.project(embeddings, faiss_index)
         logging.info("dbscan clustering...")
         self.cluster_labels = self.cluster(self.projections)
 
@@ -133,7 +150,7 @@ class ClusterClassifier:
         return self.embeddings, self.cluster_labels, self.cluster_summaries
 
     def infer(self, texts, top_k=1):
-        embeddings = self.embed(texts)
+        embeddings = self.embeddings
 
         dist, neighbours = self.faiss_index.search(embeddings, top_k)
         inferred_labels = []
@@ -143,21 +160,40 @@ class ClusterClassifier:
 
         return inferred_labels, embeddings
 
-    def embed(self, texts):
-        embeddings = self.embed_model.encode(
-            texts,
-            batch_size=self.embed_batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
+    def project(self, embeddings, faiss_index):
+        n_neighbors = 15
+
+        logging.info("querying FAISS...")
+
+        distances, indices = faiss_index.search(embeddings, n_neighbors)
+
+        logging.info("FAISS query done.")
+        logging.info("creating UMAP knn graph...")
+
+        # UMAP requires a square matrix, so we need to adjust the dimensions
+        n_samples = embeddings.shape[0]
+        distances = np.hstack([distances, np.zeros((n_samples, n_samples - n_neighbors))])
+        indices = np.hstack([indices, np.tile(np.arange(n_samples)[:, None], n_samples - n_neighbors)])
+
+        logging.info("created UMAP knn graph")
+        logging.info("creating UMAP instance...")
+
+        # Now create the UMAP instance with the precomputed KNN graph
+        umap_instance = UMAP(
+            n_neighbors=n_neighbors,
+            n_components=2,
+            metric='precomputed',
+            precomputed_knn=(distances, indices),
+            verbose=True,
         )
 
-        return embeddings
+        logging.info("created UMAP instance")
 
-    def project(self, embeddings):
-        mapper = UMAP(n_components=self.umap_components, metric=self.umap_metric).fit(
-            embeddings
+        mapper = umap_instance.fit(
+            distances,
+            force_all_finite=False,
         )
+
         return mapper.embedding_, mapper
 
     def cluster(self, embeddings):
