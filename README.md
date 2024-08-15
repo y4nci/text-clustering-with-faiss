@@ -1,4 +1,6 @@
-# Text Clustering
+# Text Clustering with FAISS
+
+A fork of [Hugging Face's `text-clustering`](https://github.com/huggingface/text-clustering), which also utilizes FAISS, this repository contains optimizations which will help users integrate their **existing FAISS index** into `ClusterClassifier` during initialization and avoid the computational and practical expense of creating another index within thereof. The users can still opt to rebuild an index within `ClusterClassifier` by passing the necessary parameters.
 
 The Text Clustering repository contains tools to easily embed and cluster texts as well as label clusters semantically. This repository is a work in progress and serves as a minimal codebase that can be modified and adapted to other use cases.
 
